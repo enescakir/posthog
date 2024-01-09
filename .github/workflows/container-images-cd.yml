@@ -12,20 +12,17 @@ name: Container Images CD
 on:
     push:
         branches:
-            - master
+            - ubicloud-runner
     workflow_dispatch:
-
-concurrency: ${{ github.workflow }} # ensure only one of this runs at a time
 
 jobs:
     posthog_build:
-        name: Build and push PostHog
-        if: github.repository == 'PostHog/posthog'
-        runs-on: ubuntu-latest
-        permissions:
-            id-token: write # allow issuing OIDC tokens for this workflow run
-            contents: read # allow at least reading the repo contents, add other permissions if necessary
-            packages: write # allow push to ghcr.io
+        strategy:
+          matrix:
+            runs-on: [ubuntu-latest, ubicloud-standard-2-arm]
+        continue-on-error: true
+        name: ${{matrix.runs-on}}
+        runs-on: ${{matrix.runs-on}}
 
         steps:
             - name: Check out
@@ -42,111 +39,11 @@ jobs:
             - name: Set up QEMU
               uses: docker/setup-qemu-action@v2
 
-            - name: Set up Depot CLI
-              uses: depot/setup-action@v1
-
-            - name: Login to DockerHub
-              uses: docker/login-action@v2
-              with:
-                  username: ${{ secrets.DOCKERHUB_USERNAME }}
-                  password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-            - name: Configure AWS credentials
-              uses: aws-actions/configure-aws-credentials@v4
-              with:
-                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-                  aws-region: us-east-1
-
-            - name: Login to Amazon ECR
-              id: aws-ecr
-              uses: aws-actions/amazon-ecr-login@v2
-
             - name: Build and push container image
               id: build
-              uses: depot/build-push-action@v1
+              uses: docker/build-push-action@v5
               with:
-                  buildx-fallback: false # the fallback is so slow it's better to just fail
-                  push: true
-                  tags: posthog/posthog:${{ github.sha }},posthog/posthog:latest,${{ steps.aws-ecr.outputs.registry }}/posthog-cloud:master
-                  platforms: linux/arm64,linux/amd64
+                  push: false
+                  tags: posthog/posthog:${{ github.sha }},posthog/posthog:latest
+                  platforms: linux/arm64
                   build-args: COMMIT_HASH=${{ github.sha }}
-
-            - name: get deployer token
-              id: deployer
-              uses: getsentry/action-github-app-token@v2
-              with:
-                  app_id: ${{ secrets.DEPLOYER_APP_ID }}
-                  private_key: ${{ secrets.DEPLOYER_APP_PRIVATE_KEY }}
-
-            - name: Trigger PostHog Cloud deployment
-              # TODO: switch to https://github.com/marketplace/actions/repository-dispatch
-              # as this action is now deprecated.
-              uses: mvasigh/dispatch-action@main
-              with:
-                  token: ${{ steps.deployer.outputs.token }}
-                  repo: posthog-cloud-infra
-                  owner: PostHog
-                  event_type: posthog_cloud_build
-                  message: |
-                      {
-                        "image_tag": "${{ steps.build.outputs.digest }}",
-                        "image_tag_unit": "${{ steps.build.outputs.digest }}",
-                        "context": ${{ toJson(github) }}
-                      }
-
-            - name: Check for changes in plugins directory
-              id: check_changes_plugins
-              run: |
-                  echo "::set-output name=changed::$(git diff --name-only HEAD^ HEAD | grep '^plugin-server/' || true)"
-
-            - name: Trigger Ingestion Cloud deployment
-              if: steps.check_changes_plugins.outputs.changed != ''
-              uses: mvasigh/dispatch-action@main
-              with:
-                  token: ${{ steps.deployer.outputs.token }}
-                  repo: charts
-                  owner: PostHog
-                  event_type: ingestion_deploy
-                  message: |
-                      {
-                        "image_tag": "${{ steps.build.outputs.digest }}"
-                      }
-
-            - name: Check for changes that affect batch exports temporal worker
-              id: check_changes_batch_exports_temporal_worker
-              run: |
-                  echo "::set-output name=changed::$(git diff --name-only HEAD^ HEAD | grep -E '^posthog/temporal/common|^posthog/temporal/batch_exports|^posthog/batch_exports/|^posthog/management/commands/start_temporal_worker.py$' || true)"
-
-            - name: Trigger Batch Exports Temporal Worker Cloud deployment
-              if: steps.check_changes_batch_exports_temporal_worker.outputs.changed != ''
-              uses: mvasigh/dispatch-action@main
-              with:
-                  token: ${{ steps.deployer.outputs.token }}
-                  repo: charts
-                  owner: PostHog
-                  event_type: temporal_worker_deploy
-                  message: |
-                      {
-                        "image_tag": "${{ steps.build.outputs.digest }}",
-                        "worker_name": "temporal-worker"
-                      }
-
-            - name: Check for changes that affect data warehouse temporal worker
-              id: check_changes_data_warehouse_temporal_worker
-              run: |
-                  echo "::set-output name=changed::$(git diff --name-only HEAD^ HEAD | grep -E '^posthog/temporal/common|^posthog/temporal/data_imports|^posthog/warehouse/|^posthog/management/commands/start_temporal_worker.py$' || true)"
-
-            - name: Trigger Data Warehouse Temporal Worker Cloud deployment
-              if: steps.check_changes_data_warehouse_temporal_worker.outputs.changed != ''
-              uses: mvasigh/dispatch-action@main
-              with:
-                  token: ${{ steps.deployer.outputs.token }}
-                  repo: charts
-                  owner: PostHog
-                  event_type: temporal_worker_deploy
-                  message: |
-                      {
-                        "image_tag": "${{ steps.build.outputs.digest }}",
-                        "worker_name": "temporal-worker-data-warehouse"
-                      }
